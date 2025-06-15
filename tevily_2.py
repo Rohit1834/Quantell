@@ -2,65 +2,143 @@ from flask import Flask, request, jsonify
 from tavily import TavilyClient
 import os
 from flask_cors import CORS
+
+# LLM imports
+from langchain_openai import AzureChatOpenAI
+from langchain_pinecone import PineconeVectorStore
+from pinecone import Pinecone
+from langchain_openai.embeddings import OpenAIEmbeddings
 from component_initilizer import *
+import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Streamlit integration
 
 # Initialize Tavily client
-from dotenv import load_dotenv
-
-load_dotenv()  # Loads variables from .env into environment
-
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 client = TavilyClient(TAVILY_API_KEY)
 
+# Initialize LLM
+# llm = AzureChatOpenAI(
+#     azure_deployment="Alfred-gpt-4o",
+#     api_version=os.environ.get("OPENAI_API_VERSION", "2024-08-01-preview"),
+#     temperature=0,
+#     max_tokens=None,
+# )
+
+logger = logging.getLogger(__name__)
+
 # Andhra Pradesh Government Domains
-AP_GOV_DOMAINS = [
+AP_GOV_DOMAINS= [
+    # Main portals
     "ap.gov.in",
-    "apland.ap.gov.in",
-    "webland.ap.gov.in",
-    "registration.ap.gov.in",
-    "aponline.ap.gov.in",
-    "appolice.gov.in",
+    "ap.nic.in", 
+    "goir.ap.gov.in",
+    
+    # Police & Law
+    "citizen.appolice.gov.in",
+    "slprb.ap.gov.in",
+    "apsp.ap.gov.in",
+    
+    # Transport
     "aptransport.org",
-    "aphrdi.ap.gov.in",
-    "apgenco.gov.in",
-    "aptransco.gov.in",
+    
+    # Power
     "apspdcl.in",
-    "apepdcl.in",
-    "apcpdcl.gov.in",
-    "apssb.gov.in",
-    "appsc.gov.in",
+    "apeasternpower.com",
+    "apcpdcl.in",
+    "aperc.gov.in",
+    
+    # Public Service
+    "psc.ap.gov.in",
+    "portal-psc.ap.gov.in",
+    
+    # Agriculture
+    "apagrisnet.gov.in",
+    "horticulture.ap.nic.in",
+    
+    # Education
+    "schooledu.ap.gov.in",
+    "cse.ap.gov.in",
     "aptet.apcfss.in",
-    "school9.ap.gov.in",
-    "apfinance.gov.in",
-    "apwater.gov.in",
-    "aphorticulture.gov.in",
-    "apagri.gov.in",
-    "apforest.gov.in",
-    "aptourism.gov.in",
-    "apithelp.gov.in",
+    
+    # Land & Revenue
     "webland.ap.gov.in",
-    "village.ap.gov.in",
-    "creditplus.ap.gov.in",
-    "epass.ap.gov.in",
-    "apmepma.gov.in",
-    "appost.in",
-    "andhrapradesh.gov.in"
+    
+    # Water Resources
+    "irrigationap.cgg.gov.in",
+    "irrigation.ap.gov.in",
+    
+    # Forest
+    "forests.ap.gov.in",
+    
+    # Finance
+    "apfinance.gov.in",
+    
+    # Services
+    "ap.meeseva.gov.in",
+    "apeprocurement.gov.in",
+    
+    # Information
+    "apegazette.cgg.gov.in"
 ]
 
-# System instruction for summarization
+# System instruction for LLM
 SYSTEM_INSTRUCTION = """
-You are a helpful AI assistant that summarizes search results from Andhra Pradesh government websites.
+You are a helpful AI assistant that answers questions based on search results from Andhra Pradesh government websites and other sources.
+
 Your task is to:
-1. Analyze the search results from AP government sources and extract relevant information
-2. Provide a clear, concise summary that directly answers the user's question
-3. Focus on the most important and relevant details from official AP government sources
-4. Maintain accuracy and avoid speculation
-5. If information is insufficient from AP government sources, acknowledge the limitations
-6. Always mention that the information is from Andhra Pradesh government sources
+1. Analyze the provided search results and extract relevant information
+2. Provide a clear, comprehensive answer that directly addresses the user's question
+3. Focus on the most important and relevant details from the search results
+4. Maintain accuracy and avoid speculation beyond what's provided in the search results
+5. If information is insufficient, acknowledge the limitations
+6. When information comes from AP government sources, mention that it's from official sources
+7. Structure your response in a clear, easy-to-understand format
+8. Provide step-by-step instructions when applicable
+
+User Query: {query}
+
+Search Results:
+{search_results}
+
+Please provide a comprehensive answer based on the above search results.
 """
+
+def generate_llm_response(query, search_results):
+    """Generate LLM response based on search results"""
+    try:
+        # Format search results for LLM
+        formatted_results = ""
+        for i, result in enumerate(search_results, 1):
+            title = result.get('title', 'No title')
+            content = result.get('content', 'No content')
+            url = result.get('url', 'No URL')
+            
+            formatted_results += f"""
+Result {i}:
+Title: {title}
+URL: {url}
+Content: {content}...
+
+"""
+        
+        # Create prompt for LLM
+        prompt = SYSTEM_INSTRUCTION.format(
+            query=query,
+            search_results=formatted_results
+        )
+        
+        # Get LLM response
+        response = llm.invoke(prompt)
+        return response.content
+        
+    except Exception as e:
+        logger.error(f"Error generating LLM response: {str(e)}")
+        return f"Sorry, I encountered an error while processing the search results: {str(e)}"
 
 @app.route('/search', methods=['POST'])
 def tavily_search():
@@ -78,10 +156,11 @@ def tavily_search():
         
         # Optional parameters with defaults
         search_depth = data.get('search_depth', 'advanced')  # 'basic' or 'advanced'
-        max_results = data.get('max_results', 5)
+        max_results = data.get('max_results', 2)
         
         # Get search scope from request, default to AP Gov only
         search_scope = data.get('search_scope', 'ap_gov_only')
+        print("search_scope is >>>>>>>>>>>>>>>>>>",search_scope)
         
         # Set domains based on search scope
         if search_scope == 'ap_gov_only':
@@ -100,7 +179,7 @@ def tavily_search():
             enhanced_query = f"{query} Andhra Pradesh AP government"
         else:
             enhanced_query = query
-        
+        print("enhance search query is >>>>>>>>>>>.",enhanced_query)
         # Perform Tavily search
         response = client.search(
             query=enhanced_query,
@@ -111,6 +190,7 @@ def tavily_search():
             include_domains=include_domains,
             exclude_domains=exclude_domains
         )
+        print("response is >>>>>>>>>>>>>>",response)
         
         # Check if results found
         if not response.get('results') or len(response['results']) == 0:
@@ -152,28 +232,16 @@ def tavily_search():
             if result.get('url'):
                 sources.append(result['url'])
         
-        # Generate summary response
-        if response.get('answer') and search_scope != 'ap_gov_only':
-            # Use Tavily's built-in answer if available and not restricting to AP gov only
-            summary_response = response['answer']
+        # Generate LLM response based on search results
+        if high_confidence_results:
+            llm_response = generate_llm_response(query, high_confidence_results)
         else:
-            # Create summary from results
-            summary_parts = []
-            for result in high_confidence_results[:3]:  # Top 3 results
-                if result.get('content'):
-                    summary_parts.append(result['content'][:300] + "...")
-            
-            if summary_parts:
-                summary_response = " ".join(summary_parts)
-                if search_scope == 'ap_gov_only':
-                    summary_response = f"Based on Andhra Pradesh government sources: {summary_response}"
-            else:
-                summary_response = "Sorry, could not find any relevant data from the specified sources"
+            llm_response = "Sorry, could not find any relevant data from the specified sources"
         
         # Prepare final response
         if sources:
             final_response = {
-                "response": summary_response,
+                "response": llm_response,
                 "source_found": ", ".join(sources),
                 "search_scope": search_scope,
                 "total_results": len(high_confidence_results)
